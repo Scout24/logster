@@ -20,5 +20,6 @@ setup(
     scripts=[
         'bin/logster'
     ],
+    data_files=[('/etc/cron.d', ['cron.d/logster'])],
     license='GPL3',
 )

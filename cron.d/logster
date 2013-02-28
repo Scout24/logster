@@ -1,0 +1,3 @@
+# execute logster every  minute
+* * * * * root /usr/bin/logster
+# done
