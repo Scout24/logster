@@ -53,6 +53,7 @@ import traceback
 
 from time import time, strftime, gmtime
 from math import floor
+from yaml import load
 
 # Local dependencies
 from logster.logster_helper import LogsterParsingException, LockingError, CloudWatch, CloudWatchException
@@ -62,8 +63,28 @@ gmetric = "/usr/bin/gmetric"
 logtail = "/usr/sbin/logtail2"
 log_dir = "/var/log/logster"
 state_dir = "/var/run"
+config_file = "/etc/logster.conf"
 
 script_start_time = time()
+
+# read config file if exists
+if os.path.exists(config_file):
+    with open(config_file, 'r') as f:
+        config = load(f)
+else:
+    config = dict()
+
+# override default with config params
+if 'logtail' in config:
+    logtail = config['logtail']
+
+metric_prefix = config['metric-prefix'] if 'metric-prefix' in config else ''
+metric_suffix = config['metric-suffix'] if 'metric-suffix' in config else None
+gmetric_options = config['gmetric-options'] if 'gmetric-options' in config else '-d 180 -c /etc/ganglia/gmond.conf'
+graphite_host = config['graphite-host'] if 'graphite-host' in config else None
+output = config['output'] if 'output' in config else None
+debug = config['debug'] if 'debug' in config else False
+dry_run = config['dry-run'] if 'dry-run' in config else False
 
 # Command-line options and parsing.
 cmdline = optparse.OptionParser(usage="usage: %prog [options] parser logfile",
@@ -72,19 +93,20 @@ cmdline.add_option('--logtail', action='store', default=logtail,
                     help='Specify location of logtail.  Default %s' % logtail)
 cmdline.add_option('--metric-prefix', '-p', action='store',
                     help='Add prefix to all published metrics. This is for people that may multiple instances of same service on same host.',
-                    default='')
+                    default=metric_prefix)
 cmdline.add_option('--metric-suffix', '-x', action='store',
                     help='Add suffix to all published metrics. This is for people that may add suffix at the end of their metrics.',
-                    default=None)
+                    default=metric_suffix)
 cmdline.add_option('--parser-help', action='store_true', 
                     help='Print usage and options for the selected parser')
 cmdline.add_option('--parser-options', action='store', 
                     help='Options to pass to the logster parser such as "-o VALUE --option2 VALUE". These are parser-specific and passed directly to the parser.')
 cmdline.add_option('--gmetric-options', action='store',
                     help='Options to pass to gmetric such as "-d 180 -c /etc/ganglia/gmond.conf" (default). These are passed directly to gmetric.',
-                    default='-d 180 -c /etc/ganglia/gmond.conf')
+                    default=gmetric_options)
 cmdline.add_option('--graphite-host', action='store',
-                    help='Hostname and port for Graphite collector, e.g. graphite.example.com:2003')
+                    help='Hostname and port for Graphite collector, e.g. graphite.example.com:2003',
+                    default=graphite_host)
 cmdline.add_option('--aws-key', action='store', default=os.getenv('AWS_ACCESS_KEY_ID'),
                     help='Amazon credential key')
 cmdline.add_option('--aws-secret-key', action='store', default=os.getenv('AWS_SECRET_ACCESS_KEY_ID'),
@@ -93,19 +115,20 @@ cmdline.add_option('--state-dir', '-s', action='store', default=state_dir,
                     help='Where to store the logtail state file.  Default location %s' % state_dir)
 cmdline.add_option('--output', '-o', action='append',
                    choices=('graphite', 'ganglia', 'stdout', 'cloudwatch'),
-                   help="Where to send metrics (can specify multiple times). Choices are 'graphite', 'ganglia', 'cloudwatch' or 'stdout'.")
+                   help="Where to send metrics (can specify multiple times). Choices are 'graphite', 'ganglia', 'cloudwatch' or 'stdout'.",
+                   default=output)
 cmdline.add_option('--stdout-separator', action='store', default="_", dest="stdout_separator",
                     help='Seperator between prefix/suffix and name for stdout. Default is \"%default\".')
-cmdline.add_option('--dry-run', '-d', action='store_true', default=False,
+cmdline.add_option('--dry-run', '-d', action='store_true', default=dry_run,
                     help='Parse the log file but send stats to standard output.')
-cmdline.add_option('--debug', '-D', action='store_true', default=False,
+cmdline.add_option('--debug', '-D', action='store_true', default=debug,
                     help='Provide more verbose logging for debugging.')
 options, arguments = cmdline.parse_args()
 
 if options.parser_help:
     options.parser_options = '-h'
 
-if (len(arguments) != 2):
+if len(arguments) != 2:
     cmdline.print_help()
     cmdline.error("Supply at least two arguments: parser and logfile.")
 if not options.output:
@@ -126,7 +149,7 @@ logtail    = options.logtail
 
 # Logging infrastructure for use throughout the script.
 # Uses appending log file, rotated at 100 MB, keeping 5.
-if (not os.path.isdir(log_dir)):
+if not os.path.isdir(log_dir):
     os.mkdir(log_dir)
 logger = logging.getLogger('logster')
 formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
@@ -135,7 +158,7 @@ hdlr.setFormatter(formatter)
 logger.addHandler(hdlr)
 logger.setLevel(logging.INFO)
 
-if (options.debug):
+if options.debug:
     logger.setLevel(logging.DEBUG)
 
 
@@ -163,63 +186,63 @@ def submit_stats(parser, duration, options):
 
 def submit_stdout(metrics, options):
     for metric in metrics:
-        if (options.metric_prefix != ""):
+        if options.metric_prefix != "":
             metric.name = options.metric_prefix + options.stdout_separator + metric.name
-        if (options.metric_suffix is not None):
+        if options.metric_suffix is not None:
             metric.name = metric.name + options.stdout_separator + options.metric_suffix
         print "%s %s" %(metric.name, metric.value)
 
 def submit_ganglia(metrics, options):
     for metric in metrics:
 
-        if (options.metric_prefix != ""):
+        if options.metric_prefix != "":
             metric.name = options.metric_prefix + "_" + metric.name
-        if (options.metric_suffix is not None):
+        if options.metric_suffix is not None:
             metric.name = metric.name + "_" + options.metric_suffix
 
         gmetric_cmd = "%s %s --name %s --value %s --type %s --units \"%s\"" % (
             gmetric, options.gmetric_options, metric.name, metric.value, metric.type, metric.units)
         logger.debug("Submitting Ganglia metric: %s" % gmetric_cmd)
 
-        if (not options.dry_run):
+        if not options.dry_run:
             os.system("%s" % gmetric_cmd)
         else:
             print "%s" % gmetric_cmd
 
 
 def submit_graphite(metrics, options):
-    if (re.match("^[\w\.\-]+\:\d+$", options.graphite_host) == None):
+    if re.match("^[\w\.\-]+\:\d+$", options.graphite_host) is None:
         raise Exception, "Invalid host:port found for Graphite: '%s'" % options.graphite_host
 
-    if (not options.dry_run):
+    if not options.dry_run:
         host = options.graphite_host.split(':')
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((host[0], int(host[1])))
 
     for metric in metrics:
 
-        if (options.metric_prefix != ""):
+        if options.metric_prefix != "":
             metric.name = options.metric_prefix + "." + metric.name
-        if (options.metric_suffix is not None):
+        if options.metric_suffix is not None:
             metric.name = metric.name + "." + options.metric_suffix
 
         metric_string = "%s %s %s" % (metric.name, metric.value, metric.timestamp)
         logger.debug("Submitting Graphite metric: %s" % metric_string)
 
-        if (not options.dry_run):
+        if not options.dry_run:
             s.send("%s\n" % metric_string)
         else:
             print "%s %s" % (options.graphite_host, metric_string)
 
-    if (not options.dry_run):
+    if not options.dry_run:
         s.close()
 
 def submit_cloudwatch(metrics, options):
     for metric in metrics:
         
-        if (options.metric_prefix != ""):
+        if options.metric_prefix != "":
             metric.name = options.metric_prefix + "." + metric.name
-        if (options.metric_suffix is not None):
+        if options.metric_suffix is not None:
             metric.name = metric.name + "." + options.metric_suffix
         
         metric.timestamp = strftime("%Y%m%dT%H:%M:00Z", gmtime(metric.timestamp))
@@ -227,7 +250,7 @@ def submit_cloudwatch(metrics, options):
         metric_string = "%s %s %s" % (metric.name, metric.value, metric.timestamp)
         logger.debug("Submitting CloudWatch metric: %s" % metric_string)
 
-        if (not options.dry_run):
+        if not options.dry_run:
             try:
                 cw = CloudWatch(options.aws_key, options.aws_secret_key, metric).get_instance_id()
             except CloudWatchException:
@@ -318,7 +341,7 @@ def main():
             logger.info('Writing new state file and exiting. (Was either first run, or state file went missing.)')
             input = os.popen(shell_tail)
             retval = input.close()
-            if (retval != 256):
+            if retval != 256:
                 logger.warning('%s returned bad exit code %s' % (shell_tail, retval))
             end_locking(lockfile, logtail_lock_file)
             sys.exit(0)
