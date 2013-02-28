@@ -128,9 +128,12 @@ options, arguments = cmdline.parse_args()
 if options.parser_help:
     options.parser_options = '-h'
 
+if len(arguments) == 0 and 'classname' in config and 'logfile' in config:
+    arguments = [config['classname'], config['logfile']]
+
 if len(arguments) != 2:
     cmdline.print_help()
-    cmdline.error("Supply at least two arguments: parser and logfile.")
+    cmdline.error("Supply at least two arguments: parser and logfile or define them in /etc/logster.conf")
 if not options.output:
     cmdline.print_help()
     cmdline.error("Supply where the data should be sent with -o (or --output).")
